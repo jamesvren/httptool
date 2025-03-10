@@ -11,7 +11,6 @@ use mime_guess::from_path;
 use multer::Multipart;
 use std::path::PathBuf;
 use tokio::fs::{self, File, metadata};
-//use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
@@ -55,10 +54,10 @@ fn format_file_size(size: u64) -> String {
 
 async fn list_directory(path: PathBuf) -> Result<Response<BoxBody<Bytes, std::io::Error>>> {
     let mut entries = fs::read_dir(&path).await.unwrap();
-    let mut file_list = String::from(
-        r#"
+    let mut file_list = String::from(r#"
         <html>
             <head>
+                <meta charset="UTF-8">
                 <style>
                     body {
                         display: flex;
@@ -102,6 +101,31 @@ async fn list_directory(path: PathBuf) -> Result<Response<BoxBody<Bytes, std::io
                     .file-input {
                         margin-bottom: 10px;
                     }
+                    .drop-zone {
+                        border: 2px dashed #ccc;
+                        padding: 20px;
+                        text-align: center;
+                        color: #888;
+                        margin-bottom: 10px;
+                    }
+                    .drop-zone.dragover {
+                        border-color: #4CAF50;
+                        background-color: #f0fff0;
+                    }
+                    .file-list-item {
+                        margin: 5px 0;
+                    }
+                    .file-progress {
+                        margin-top: 5px;
+                    }
+                    .cancel-button {
+                        background-color: #ff4444;
+                        color: white;
+                        border: none;
+                        padding: 5px 10px;
+                        cursor: pointer;
+                        margin-left: 10px;
+                    }
                 </style>
             </head>
             <body>
@@ -113,13 +137,11 @@ async fn list_directory(path: PathBuf) -> Result<Response<BoxBody<Bytes, std::io
                             <tr>
                                 <th>Name</th>
                                 <th>Size</th>
-                                <th>Bytes</th>
                                 <th>Date Modified</th>
                             </tr>
                         </thead>
                         <tbody>
-    "#,
-    );
+    "#);
 
     while let Some(entry) = entries.next_entry().await.unwrap() {
         let entry_path = entry.path();
@@ -148,66 +170,148 @@ async fn list_directory(path: PathBuf) -> Result<Response<BoxBody<Bytes, std::io
                     </table>
                 </div>
                 <div class="upload-form">
-                    <h2>Upload File</h2>
+                    <h2>Upload Files</h2>
+                    <div class="drop-zone" id="dropZone">
+                        Drag and drop files here or click to select files.
+                        <div id="fileList"></div>
+                    </div>
                     <form id="uploadForm" method="post" enctype="multipart/form-data">
-                        <input type="file" name="file" id="fileInput" class="file-input">
+                        <input type="file" name="files" id="fileInput" class="file-input" multiple>
                         <input type="submit" value="Upload" class="upload-button">
                     </form>
-                    <div style="margin-top: 10px;">
-                        <progress id="progressBar" value="0" max="100" style="width: 100%;"></progress>
-                        <span id="progressText">0%</span>
-                    </div>
-                    <h3>Uploaded Files</h3>
-                    <ul id="uploadedFiles"></ul>
+                    <div id="uploadProgress"></div>
                     <script>
-                        document.getElementById('uploadForm').onsubmit = function(event) {
+                        const dropZone = document.getElementById('dropZone');
+                        const fileInput = document.getElementById('fileInput');
+                        const uploadForm = document.getElementById('uploadForm');
+                        const uploadProgress = document.getElementById('uploadProgress');
+                        const fileList = document.getElementById('fileList');
+
+                        let uploadRequests = {};
+
+                        dropZone.addEventListener('click', () => fileInput.click());
+
+                        dropZone.addEventListener('dragover', (e) => {
+                            e.preventDefault();
+                            dropZone.classList.add('dragover');
+                        });
+
+                        dropZone.addEventListener('dragleave', () => {
+                            dropZone.classList.remove('dragover');
+                        });
+
+                        dropZone.addEventListener('drop', (e) => {
+                            e.preventDefault();
+                            dropZone.classList.remove('dragover');
+                            fileInput.files = e.dataTransfer.files;
+                            updateFileList(fileInput.files);
+                        });
+
+                        fileInput.addEventListener('change', () => {
+                            updateFileList(fileInput.files);
+                        });
+
+                        function updateFileList(files) {
+                            fileList.innerHTML = '';
+                            for (let i = 0; i < files.length; i++) {
+                                const fileItem = document.createElement('div');
+                                fileItem.className = 'file-list-item';
+                                fileItem.innerText = files[i].name;
+                                fileList.appendChild(fileItem);
+                            }
+                        }
+
+                        uploadForm.onsubmit = function(event) {
                             event.preventDefault();
-                            const fileInput = document.getElementById('fileInput');
-                            const file = fileInput.files[0];
-                            if (!file) return;
+                            const files = fileInput.files;
+                            if (!files || files.length === 0) return;
 
-                            const formData = new FormData();
-                            formData.append('file', file);
+                            uploadProgress.innerHTML = '';
 
-                            const xhr = new XMLHttpRequest();
-                            let startTime = Date.now(), uploadedBytes = 0;
-                            xhr.open('POST', window.location.pathname, true);
+                            for (let i = 0; i < files.length; i++) {
+                                const file = files[i];
+                                const formData = new FormData();
+                                formData.append('files', file);
 
-                            xhr.upload.onprogress = function(event) {
-                                if (event.lengthComputable) {
-                                    const percent = (event.loaded / event.total) * 100;
-                                    const progressBar = document.getElementById('progressBar');
-                                    const progressText = document.getElementById('progressText');
+                                const xhr = new XMLHttpRequest();
+                                xhr.open('POST', window.location.pathname, true);
 
-                                    const currentTime = Date.now();
-                                    const elapsedTime = (currentTime - startTime) / 1000; // 转换为秒
-                                    uploadedBytes += event.loaded - uploadedBytes; // 累计已上传字节
-                                    const speedKBps = (uploadedBytes / elapsedTime) / 1024; 
-                                    const speedMBps = speedKBps / 1024;
-                                    if (speedMBps > 1) {
-                                        progressText.innerText = `${percent.toFixed(2)}% / ${speedMBps.toFixed(2)} MB/s`;
-                                    } else {
-                                        progressText.innerText = `${percent.toFixed(2)}% / ${speedKBps.toFixed(2)} KB/s`;
+                                const progressContainer = document.createElement('div');
+                                progressContainer.className = 'file-progress';
+                                progressContainer.innerHTML = `
+                                    <div>${file.name}</div>
+                                    <progress value="0" max="100"></progress>
+                                    <span>0%</span>
+                                    <span id="speed-file${i}" style="margin-left: 10px;"></span>
+                                    <button class="cancel-button" onclick="cancelUpload('${file.name}')">Cancel</button>
+                                `;
+                                uploadProgress.appendChild(progressContainer);
+
+                                const progressBar = progressContainer.querySelector('progress');
+                                const progressText = progressContainer.querySelector('span');
+                                const speedText = progressContainer.querySelector(`#speed-file${i}`);
+                                const cancelButton = progressContainer.querySelector('.cancel-button');
+
+                                uploadRequests[file.name] = xhr;
+
+                                let lastLoaded = 0;
+                                let lastTime = Date.now();
+
+                                xhr.upload.onprogress = function(event) {
+                                    if (event.lengthComputable) {
+                                        const percent = (event.loaded / event.total) * 100;
+                                        progressBar.value = percent;
+                                        progressText.innerText = `${percent.toFixed(2)}%`;
+
+                                        // Calculate upload speed
+                                        const currentTime = Date.now();
+                                        const timeDiff = (currentTime - lastTime) / 1000; // in seconds
+                                        const loadedDiff = event.loaded - lastLoaded; // in bytes
+                                        const speed = loadedDiff / timeDiff; // in bytes per second
+
+                                        // Format speed
+                                        const speedKB = speed / 1024; // in KB/s
+                                        const speedMB = speedKB / 1024; // in MB/s
+                                        if (speedMB >= 1) {
+                                            speedText.innerText = `${speedMB.toFixed(2)} MB/s`;
+                                        } else {
+                                            speedText.innerText = `${speedKB.toFixed(2)} KB/s`;
+                                        }
+
+                                        lastLoaded = event.loaded;
+                                        lastTime = currentTime;
                                     }
-                                    progressBar.value = percent;
-                                }
-                            };
+                                };
 
-                            xhr.onload = function() {
-                                if (xhr.status === 201) {
-                                    document.getElementById('progressText').innerText = 'Upload complete!';
-                                    const uploadedFiles = document.getElementById('uploadedFiles');
-                                    const listItem = document.createElement('li');
-                                    listItem.innerText = `${file.name}  - ${uploadedBytes}`;
-                                    uploadedFiles.appendChild(listItem);
-                                    setTimeout(() => window.location.reload(), 3000); // Refresh after 3 second
-                                } else {
-                                    document.getElementById('progressText').innerText = 'Upload failed!';
-                                }
-                            };
+                                xhr.onload = function() {
+                                    if (xhr.status === 201) {
+                                        progressText.innerText = 'Upload complete!';
+                                        cancelButton.style.display = 'none'; // Hide cancel button
+                                        delete uploadRequests[file.name];
+                                    } else {
+                                        progressText.innerText = 'Upload failed!';
+                                        delete uploadRequests[file.name];
+                                    }
+                                };
 
-                            xhr.send(formData);
+                                xhr.send(formData);
+                            }
                         };
+
+                        function cancelUpload(fileName) {
+                            const xhr = uploadRequests[fileName];
+                            if (xhr) {
+                                xhr.abort();
+                                delete uploadRequests[fileName];
+                                const progressContainer = Array.from(uploadProgress.children).find(
+                                    (child) => child.querySelector('div').innerText === fileName
+                                );
+                                if (progressContainer) {
+                                    progressContainer.querySelector('span').innerText = 'Cancelled';
+                                    progressContainer.querySelector('.cancel-button').style.display = 'none'; // Hide cancel button
+                                }
+                            }
+                        }
                     </script>
                 </div>
             </body>
