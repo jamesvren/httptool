@@ -137,6 +137,7 @@ async fn list_directory(path: PathBuf) -> Result<Response<BoxBody<Bytes, std::io
                             <tr>
                                 <th>Name</th>
                                 <th>Size</th>
+                                <th>Bytes</th>
                                 <th>Date Modified</th>
                             </tr>
                         </thead>

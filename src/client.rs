@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::ToStrError;
 use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
@@ -57,9 +57,12 @@ pub struct Downloader {
 
 impl Downloader {
     pub fn new(max_retries: usize, timeout: u64) -> Self {
+        const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
         let client = Client::builder()
-            .connection_verbose(true)
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .danger_accept_invalid_certs(true)
+            .user_agent(USER_AGENT)
+            //.connection_verbose(true)
+            //.redirect(reqwest::redirect::Policy::limited(5))
             .connect_timeout(Duration::from_secs(timeout))
             .read_timeout(Duration::from_secs(timeout))
             .build()
@@ -103,20 +106,20 @@ impl Downloader {
         let (resumable, content_length, url) = self.get_content_info(&url).await?;
         tracing::debug!("Final URL: {url}");
 
-        let m = MultiProgress::new();
-        let progress_bar = m.add(ProgressBar::new(content_length));
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template("{msg}{spinner} [{bar:40}] {bytes}/{total_bytes} ({percent}% | {bytes_per_sec}, {eta})")
-                .unwrap(),
-        );
-        //let progress_bar = ProgressBar::new(content_length);
+        //let m = MultiProgress::new();
+        //let progress_bar = m.add(ProgressBar::new(content_length));
         //progress_bar.set_style(
         //    ProgressStyle::default_bar()
-        //       .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}% | {bytes_per_sec}, {eta})")
-        //       .unwrap()
-        //       .progress_chars("#>-"),
+        //        .template("{msg}{spinner} [{bar:40}] {bytes}/{total_bytes} ({percent}% | {bytes_per_sec}, {eta})")
+        //        .unwrap(),
         //);
+        let progress_bar = ProgressBar::new(content_length);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+               .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}% | {bytes_per_sec}, {eta})")
+               .unwrap()
+        //       .progress_chars("#>-"),
+        );
 
         if resumable {
             progress_bar.set_message("Downloading");
@@ -148,12 +151,11 @@ impl Downloader {
             }
         }
 
-        let chunk_size = (content_length as f64 / self.trunk as f64).ceil() as u64;
+        let mut chunk_size = (content_length as f64 / self.trunk as f64).ceil() as u64;
+        if chunk_size < 1024 {
+            chunk_size = content_length;
+        }
 
-        tracing::debug!(
-            "Start {} tasks to download [len: {content_length}, trunk: {chunk_size}]",
-            self.trunk
-        );
         let mut chunks = Vec::new();
         let mut start = 0;
         while start < content_length {
@@ -167,6 +169,10 @@ impl Downloader {
             start = end + 1;
         }
 
+        tracing::debug!(
+            "Start {} tasks to download [len: {content_length}, trunk: {chunk_size}]",
+            chunks.len()
+        );
         Ok(DownloadState {
             url: url.to_string(),
             file,
@@ -260,27 +266,24 @@ impl Downloader {
                 }
                 let mut retries = 0;
 
-                while retries < max_retries {
-                    if let Err(e) = Self::download_chunk(
-                        &client,
-                        &url,
-                        &progress_bar,
-                        chunk,
-                        &state_arc,
-                        i,
-                        &filename,
-                        &state_file,
-                    )
-                    .await
-                    {
-                        retries += 1;
-                        println!("Download Error: {e}, retry({retries})...");
+                while let Err(ref e) = Self::download_chunk(
+                    &client,
+                    &url,
+                    &progress_bar,
+                    chunk,
+                    &state_arc,
+                    i,
+                    &filename,
+                    &state_file
+                ).await {
+                    if retries == max_retries {
+                        println!("Error: All retries failed!!!");
+                        return Err(DownloadError::Error("Failed to download".to_string()));
                     }
+                    retries += 1;
+                    println!("Download Error: {e}, retry({retries})...");
                 }
-                if retries == max_retries {
-                    println!("Error: All retries failed!!!");
-                    return Err(DownloadError::Error("Failed to download".to_string()));
-                }
+
                 let mut state = state_arc.lock().await;
                 state.chunks[i].completed = true;
                 Self::save_state(&state_file, &state).await
